@@ -91,6 +91,13 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
         'quiet': True,
         'no_warnings': True,
         'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
+        'extractor_args': {'youtube': {'player_client': ['web']}},
+        'socket_timeout': 30,
+        'retries': 3,
     }
 
     info = None
