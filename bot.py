@@ -17,8 +17,8 @@ from yt_dlp import YoutubeDL
 TOKEN = os.environ.get('TOKEN', '8870862159:AAF3WlBNfgqejm4yPDeyGnrwjdIDkFGemCM')
 DOWNLOAD_DIR = 'downloads'
 MAX_FILE_SIZE_MB = 50
-REQUIRED_CHANNEL = '@Soulscript0'
-CHANNEL_LINK = 'https://t.me/Soulscript0'
+REQUIRED_CHANNEL = '@Soulscript16'
+CHANNEL_LINK = 'https://t.me/Soulscript16'
 OWNER_ID = 8731823643  # Owner's Telegram user ID
 
 # Myanmar timezone (GMT+6:30)
