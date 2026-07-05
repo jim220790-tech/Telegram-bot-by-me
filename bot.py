@@ -7,7 +7,7 @@ import threading
 import time
 import requests
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from yt_dlp import YoutubeDL
 
@@ -15,6 +15,8 @@ from yt_dlp import YoutubeDL
 TOKEN = os.environ.get('TOKEN', '8870862159:AAF3WlBNfgqejm4yPDeyGnrwjdIDkFGemCM')
 AUDIO_DIR = 'downloads'
 MAX_FILE_SIZE_MB = 50
+REQUIRED_CHANNEL = '@Soulscript0'
+CHANNEL_LINK = 'https://t.me/Soulscript0'
 
 # Set up logging
 logging.basicConfig(
@@ -26,8 +28,39 @@ logger = logging.getLogger(__name__)
 # Ensure download directory exists
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
+async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if user has joined the required channel."""
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        if member.status in ['member', 'administrator', 'creator']:
+            return True
+        else:
+            return False
+    except Exception as e:
+        logger.error(f"Error checking membership for user {user_id}: {e}")
+        return False
+
+async def send_join_message(update: Update) -> None:
+    """Send a message asking the user to join the channel."""
+    keyboard = [
+        [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ I've Joined", callback_data="check_joined")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "⚠️ You must join our channel to use this bot.\n\n"
+        f"👉 Join: {CHANNEL_LINK}\n\n"
+        "After joining, tap the button below to verify.",
+        reply_markup=reply_markup
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a welcome message when the command /start is issued."""
+    if not await check_membership(update, context):
+        await send_join_message(update)
+        return
+
     user = update.effective_user
     await update.message.reply_html(
         f"Hi {user.mention_html()}!\n\n"
@@ -100,6 +133,11 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle regular text messages - detect TikTok or YouTube links."""
     if update.message.text and not update.message.text.startswith('/'):
+        # Check channel membership first
+        if not await check_membership(update, context):
+            await send_join_message(update)
+            return
+
         text = update.message.text.strip()
         # Auto-detect TikTok links
         if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
@@ -117,6 +155,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download audio from a TikTok URL."""
+    if not await check_membership(update, context):
+        await send_join_message(update)
+        return
+
     if not context.args:
         await update.message.reply_text("Please provide a TikTok URL. Example: /tiktok https://vt.tiktok.com/ZSCpetre9/")
         return
@@ -128,6 +170,10 @@ async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download audio from a YouTube URL."""
+    if not await check_membership(update, context):
+        await send_join_message(update)
+        return
+
     if not context.args:
         await update.message.reply_text("Please provide a YouTube URL. Example: /youtube https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         return
@@ -137,18 +183,29 @@ async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await download_audio(update, context, url, "YouTube")
 
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "check_joined":
+        user_id = query.from_user.id
+        try:
+            member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+            if member.status in ['member', 'administrator', 'creator']:
+                await query.message.edit_text("✅ Verified! You can now use the bot. Just send me a TikTok or YouTube link.")
+            else:
+                await query.answer("❌ You haven't joined the channel yet. Please join first.", show_alert=True)
+        except Exception as e:
+            logger.error(f"Error verifying membership: {e}")
+            await query.answer("❌ Could not verify. Make sure you joined the channel.", show_alert=True)
+
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'Bot is running')
-        else:
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
     
     def log_message(self, format, *args):
         pass  # Suppress HTTP server logs
@@ -183,6 +240,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("tiktok", tiktok_command))
     application.add_handler(CommandHandler("youtube", youtube_command))
+    application.add_handler(CallbackQueryHandler(button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Start HTTP server in a separate thread
