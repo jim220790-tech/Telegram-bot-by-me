@@ -331,7 +331,7 @@ async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, origin
     try:
         response = requests.get(
             f"https://api.deezer.com/search",
-            params={'q': query, 'limit': 5},
+            params={'q': query, 'limit': 10},
             timeout=10
         )
         data = response.json()
@@ -340,19 +340,28 @@ async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, origin
             await message.reply_text("❌ No results found. Try a different search term.")
             return
 
+        # Sort by popularity (rank) - lower rank = more popular
+        tracks = sorted(data['data'], key=lambda x: x.get('rank', 0), reverse=True)
+        # Take top 5
+        tracks = tracks[:5]
+
         keyboard = []
-        for track in data['data']:
+        for track in tracks:
             title = track.get('title', 'Unknown')
             artist = track.get('artist', {}).get('name', 'Unknown')
             track_id = track.get('id')
-            display = f"🎵 {title} - {artist}"
-            if len(display) > 50:
-                display = display[:47] + "..."
+            duration_sec = track.get('duration', 0)
+            minutes = duration_sec // 60
+            seconds = duration_sec % 60
+            duration_str = f"{minutes}:{seconds:02d}"
+            display = f"🎵 {title} - {artist} [{duration_str}]"
+            if len(display) > 60:
+                display = display[:57] + "..."
             callback_data = f"deezer:{track_id}"
             keyboard.append([InlineKeyboardButton(display, callback_data=callback_data)])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text("🎶 Select a song to download:", reply_markup=reply_markup)
+        await message.reply_text("🎶 Select a song to download:\n(Sorted by popularity 🔥)", reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Error searching for '{query}': {e}")
@@ -377,13 +386,23 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
 
         title = track.get('title', 'Unknown')
         artist = track.get('artist', {}).get('name', 'Unknown')
+        album = track.get('album', {}).get('title', 'Unknown')
         preview_url = track.get('preview')
+        duration_sec = track.get('duration', 0)
+        minutes = duration_sec // 60
+        seconds = duration_sec % 60
+        duration_str = f"{minutes}:{seconds:02d}"
 
         if not preview_url:
             await context.bot.send_message(chat_id, "❌ No preview available for this track.")
             return
 
-        await context.bot.send_message(chat_id, f"🎵 Downloading: {title} - {artist}...")
+        await context.bot.send_message(
+            chat_id,
+            f"🎵 Downloading: {title} - {artist}\n"
+            f"💿 Album: {album}\n"
+            f"⏱ Duration: {duration_str}"
+        )
 
         file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{artist}.mp3".replace('/', '_').replace(' ', '_'))
         audio_response = requests.get(preview_url, timeout=30)
@@ -396,7 +415,8 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
                 chat_id=chat_id,
                 audio=open(file_path, 'rb'),
                 title=title,
-                performer=artist
+                performer=artist,
+                duration=duration_sec
             )
 
             os.remove(file_path)
