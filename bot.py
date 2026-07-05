@@ -67,13 +67,91 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Hi {user.mention_html()}! 🎵\n\n"
         "I'm a music & video downloader bot.\n\n"
         "🔹 <b>TikTok Download:</b>\n"
-        "Just paste a TikTok link and choose video or audio.\n\n"
+        "Paste a TikTok link → choose Video or Audio\n\n"
         "🔹 <b>Song Search:</b>\n"
-        "Send a song name and I'll find it for you.\n\n"
-        "Commands:\n"
-        "/start - Show this message\n"
-        "/search <song name> - Search for a song"
+        "Type any song name → I'll find it for you\n\n"
+        "Just send me a TikTok link or a song name!"
     )
+
+async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    """Search for a song using Deezer API and show results."""
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text(f"🔍 Searching for '{query}'...")
+
+    try:
+        # Use Deezer public API (no auth required)
+        response = requests.get(
+            f"https://api.deezer.com/search",
+            params={'q': query, 'limit': 5},
+            timeout=10
+        )
+        data = response.json()
+
+        if 'data' not in data or not data['data']:
+            await message.reply_text("❌ No results found. Try a different search term.")
+            return
+
+        keyboard = []
+        for track in data['data']:
+            title = track.get('title', 'Unknown')
+            artist = track.get('artist', {}).get('name', 'Unknown')
+            track_id = track.get('id')
+            display = f"🎵 {title} - {artist}"
+            if len(display) > 50:
+                display = display[:47] + "..."
+            callback_data = f"deezer:{track_id}"
+            keyboard.append([InlineKeyboardButton(display, callback_data=callback_data)])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await message.reply_text("🎶 Select a song to download:", reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Error searching for '{query}': {e}")
+        await message.reply_text("❌ An error occurred during search. Please try again later.")
+
+async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TYPE, track_id: str) -> None:
+    """Download a track preview from Deezer."""
+    query = update.callback_query
+    message = query.message
+
+    try:
+        # Get track info from Deezer
+        response = requests.get(f"https://api.deezer.com/track/{track_id}", timeout=10)
+        track = response.json()
+
+        title = track.get('title', 'Unknown')
+        artist = track.get('artist', {}).get('name', 'Unknown')
+        preview_url = track.get('preview')
+
+        if not preview_url:
+            await message.reply_text("❌ No preview available for this track.")
+            return
+
+        await message.reply_text(f"🎵 Downloading: {title} - {artist}...")
+
+        # Download the preview MP3
+        file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{artist}.mp3".replace('/', '_').replace(' ', '_'))
+        audio_response = requests.get(preview_url, timeout=30)
+
+        if audio_response.status_code == 200:
+            with open(file_path, 'wb') as f:
+                f.write(audio_response.content)
+
+            await message.reply_audio(
+                audio=open(file_path, 'rb'),
+                title=title,
+                performer=artist
+            )
+
+            os.remove(file_path)
+        else:
+            await message.reply_text("❌ Could not download the track.")
+
+    except Exception as e:
+        logger.error(f"Error downloading Deezer track {track_id}: {e}")
+        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
+    finally:
+        cleanup_downloads()
 
 async def download_tiktok_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """Download audio from a TikTok URL."""
@@ -167,103 +245,6 @@ async def download_tiktok_video(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         cleanup_downloads()
 
-async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    """Search for a song using yt-dlp SoundCloud search and show results."""
-    message = update.message if update.message else update.callback_query.message
-    await message.reply_text(f"🔍 Searching for '{query}'...")
-
-    ydl_opts = {
-        'default_search': 'scsearch5',
-        'noplaylist': True,
-        'quiet': True,
-        'extract_flat': True,
-    }
-
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-            if 'entries' in info:
-                results = info['entries']
-                if not results:
-                    await message.reply_text("❌ No results found. Try a different search term.")
-                    return
-
-                keyboard = []
-                for i, entry in enumerate(results):
-                    if entry and 'url' in entry and 'title' in entry:
-                        title = entry['title'][:50]  # Truncate long titles
-                        callback_data = f"song:{entry['url']}"
-                        if len(callback_data) <= 64:
-                            keyboard.append([InlineKeyboardButton(f"🎵 {title}", callback_data=callback_data)])
-                        else:
-                            # Store URL in context for long URLs
-                            key = f"song_{i}_{hash(entry['url']) % 10000}"
-                            context.bot_data[key] = entry['url']
-                            keyboard.append([InlineKeyboardButton(f"🎵 {title}", callback_data=f"songkey:{key}")])
-
-                if not keyboard:
-                    await message.reply_text("❌ No downloadable results found.")
-                    return
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await message.reply_text("🎶 Select a song to download:", reply_markup=reply_markup)
-            else:
-                await message.reply_text("❌ Could not find any songs.")
-    except Exception as e:
-        logger.error(f"Error searching for '{query}': {e}")
-        await message.reply_text("❌ An error occurred during search. Please try again later.")
-
-async def download_song(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    """Download a song from URL."""
-    query = update.callback_query
-    message = query.message
-    await message.reply_text("🎵 Downloading song...")
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
-        'restrictfilenames': True,
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
-    }
-
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            base, ext = os.path.splitext(file_path)
-            if ext != '.mp3':
-                file_path = base + '.mp3'
-
-            if not os.path.exists(file_path):
-                await message.reply_text("❌ Error: Could not download song.")
-                return
-
-            file_size = os.path.getsize(file_path)
-            if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                await message.reply_text(f"❌ File exceeds {MAX_FILE_SIZE_MB}MB limit.")
-            else:
-                await message.reply_audio(
-                    audio=open(file_path, 'rb'),
-                    title=info.get('title', 'Song'),
-                    performer=info.get('artist', info.get('uploader', 'Unknown'))
-                )
-
-            os.remove(file_path)
-
-    except Exception as e:
-        logger.error(f"Error downloading song from {url}: {e}")
-        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
-    finally:
-        cleanup_downloads()
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle regular text messages."""
     if update.message.text and not update.message.text.startswith('/'):
@@ -275,9 +256,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Auto-detect TikTok links
         if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
             # Show options: video or audio
+            # Store URL in bot_data to avoid callback_data length limit
+            url_key = f"tt_{update.effective_user.id}_{int(time.time())}"
+            context.bot_data[url_key] = text
             keyboard = [
-                [InlineKeyboardButton("🎬 Video", callback_data=f"ttvideo:{text}")],
-                [InlineKeyboardButton("🎵 Audio Only", callback_data=f"ttaudio:{text}")]
+                [InlineKeyboardButton("🎬 Video", callback_data=f"ttvideo:{url_key}")],
+                [InlineKeyboardButton("🎵 Audio Only", callback_data=f"ttaudio:{url_key}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text("Choose download format:", reply_markup=reply_markup)
@@ -293,7 +277,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     query = ' '.join(context.args)
     if not query:
-        await update.message.reply_text("Please provide a song name. Example: /search Stay Forever")
+        await update.message.reply_text("Please provide a song name. Example: /search Blue")
         return
     await search_song(update, context, query)
 
@@ -317,24 +301,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.answer("❌ Could not verify. Make sure you joined the channel.", show_alert=True)
 
     elif data.startswith("ttvideo:"):
-        url = data[8:]
-        await download_tiktok_video(update, context, url)
+        url_key = data[8:]
+        url = context.bot_data.get(url_key)
+        if url:
+            await download_tiktok_video(update, context, url)
+        else:
+            await query.message.reply_text("❌ Link expired. Please send the TikTok link again.")
 
     elif data.startswith("ttaudio:"):
-        url = data[8:]
-        await download_tiktok_audio(update, context, url)
-
-    elif data.startswith("song:"):
-        url = data[5:]
-        await download_song(update, context, url)
-
-    elif data.startswith("songkey:"):
-        key = data[8:]
-        url = context.bot_data.get(key)
+        url_key = data[8:]
+        url = context.bot_data.get(url_key)
         if url:
-            await download_song(update, context, url)
+            await download_tiktok_audio(update, context, url)
         else:
-            await query.message.reply_text("❌ Song link expired. Please search again.")
+            await query.message.reply_text("❌ Link expired. Please send the TikTok link again.")
+
+    elif data.startswith("deezer:"):
+        track_id = data[7:]
+        await download_deezer_track(update, context, track_id)
 
 def cleanup_downloads():
     """Clean up any leftover files in download directory."""
