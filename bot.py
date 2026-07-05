@@ -7,11 +7,12 @@ import socketserver
 import threading
 import time
 import requests
-from datetime import time as dtime, timezone, timedelta
+from datetime import time as dtime, timezone, timedelta, datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from yt_dlp import YoutubeDL
+from myanmar_utils import get_romanized_query
 
 # Configuration
 TOKEN = os.environ.get('TOKEN', '8870862159:AAF3WlBNfgqejm4yPDeyGnrwjdIDkFGemCM')
@@ -27,6 +28,7 @@ MMR_TZ = timezone(timedelta(hours=6, minutes=30))
 # File to store users and quote
 USERS_FILE = 'users.json'
 QUOTE_FILE = 'quote.json'
+SCHEDULE_FILE = 'schedule.json'
 
 # Set up logging
 logging.basicConfig(
@@ -77,6 +79,22 @@ def set_quote(quote: str):
     with open(QUOTE_FILE, 'w') as f:
         json.dump({'quote': quote}, f)
 
+# --- Schedule management ---
+def get_schedule() -> dict:
+    """Get the current broadcast schedule."""
+    if os.path.exists(SCHEDULE_FILE):
+        try:
+            with open(SCHEDULE_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {'hour': 19, 'minute': 30}
+    return {'hour': 19, 'minute': 30}
+
+def save_schedule(hour: int, minute: int):
+    """Save the broadcast schedule."""
+    with open(SCHEDULE_FILE, 'w') as f:
+        json.dump({'hour': hour, 'minute': minute}, f)
+
 # --- Broadcast function ---
 async def broadcast_quote(context: ContextTypes.DEFAULT_TYPE):
     """Send the current quote to all users."""
@@ -90,11 +108,15 @@ async def broadcast_quote(context: ContextTypes.DEFAULT_TYPE):
     failed = 0
     for user_id in users:
         try:
-            await context.bot.send_message(chat_id=user_id, text=f"✨ Daily Quote ✨\n\n{quote}")
+            await context.bot.send_message(chat_id=int(user_id), text=f"✨ Daily Quote ✨\n\n{quote}")
             success += 1
         except Exception as e:
             logger.error(f"Failed to send quote to {user_id}: {e}")
             failed += 1
+        # Small delay to avoid hitting Telegram rate limits
+        if success % 25 == 0:
+            import asyncio
+            await asyncio.sleep(1)
 
     logger.info(f"Broadcast complete: {success} sent, {failed} failed")
 
@@ -102,7 +124,7 @@ async def broadcast_quote(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=OWNER_ID,
-            text=f"📊 Broadcast Report:\n✅ Sent: {success}\n❌ Failed: {failed}"
+            text=f"📊 Broadcast Report:\n✅ Sent: {success}\n❌ Failed: {failed}\n👥 Total users: {len(users)}"
         )
     except:
         pass
@@ -170,13 +192,17 @@ async def setquote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     set_quote(quote_text)
 
+    schedule = get_schedule()
+    schedule_time = f"{schedule['hour']:02d}:{schedule['minute']:02d}"
+
     keyboard = [
-        [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")]
+        [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")],
+        [InlineKeyboardButton("⏰ Change Schedule Time", callback_data="change_schedule")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
         f"✅ Quote set!\n\n\"{quote_text}\"\n\n"
-        "This will be sent to all users at 7:30 PM daily.\n"
+        f"⏰ Scheduled daily at: {schedule_time} (Myanmar Time)\n"
         "Or tap the button below to send it now:",
         reply_markup=reply_markup
     )
@@ -189,12 +215,17 @@ async def viewquote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     quote = get_quote()
     if quote:
+        schedule = get_schedule()
+        schedule_time = f"{schedule['hour']:02d}:{schedule['minute']:02d}"
+
         keyboard = [
-            [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")]
+            [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")],
+            [InlineKeyboardButton("⏰ Change Schedule Time", callback_data="change_schedule")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             f"📝 Current quote:\n\n\"{quote}\"\n\n"
+            f"⏰ Scheduled daily at: {schedule_time} (Myanmar Time)\n"
             f"👥 Total users: {len(load_users())}",
             reply_markup=reply_markup
         )
@@ -209,15 +240,58 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     users = load_users()
     quote = get_quote()
+    schedule = get_schedule()
+    schedule_time = f"{schedule['hour']:02d}:{schedule['minute']:02d}"
     await update.message.reply_text(
         f"📊 Bot Stats:\n\n"
         f"👥 Total users: {len(users)}\n"
-        f"📝 Current quote: {quote if quote else 'Not set'}"
+        f"📝 Current quote: {quote if quote else 'Not set'}\n"
+        f"⏰ Broadcast time: {schedule_time} (Myanmar Time)"
+    )
+
+async def settime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner command to set broadcast time. Usage: /settime HH:MM"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Only the owner can use this command.")
+        return
+
+    time_text = ' '.join(context.args)
+    if not time_text or ':' not in time_text:
+        await update.message.reply_text("Usage: /settime HH:MM\nExample: /settime 20:00")
+        return
+
+    try:
+        parts = time_text.split(':')
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError("Invalid time")
+    except:
+        await update.message.reply_text("❌ Invalid time format. Use HH:MM (24-hour format)\nExample: /settime 20:00")
+        return
+
+    save_schedule(hour, minute)
+
+    # Remove old job and add new one
+    job_queue = context.application.job_queue
+    # Remove existing daily_quote jobs
+    current_jobs = job_queue.get_jobs_by_name("daily_quote")
+    for job in current_jobs:
+        job.schedule_removal()
+
+    # Schedule new time
+    target_time = dtime(hour=hour, minute=minute, second=0, tzinfo=MMR_TZ)
+    job_queue.run_daily(daily_quote_job, time=target_time, name="daily_quote")
+
+    await update.message.reply_text(
+        f"✅ Broadcast time updated to {hour:02d}:{minute:02d} (Myanmar Time)\n\n"
+        "The daily quote will be sent at this time every day."
     )
 
 # --- Song search ---
-async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, original_query: str) -> None:
     """Search for a song using Deezer API and show results."""
+    query = get_romanized_query(original_query)
     message = update.message if update.message else update.callback_query.message
     await message.reply_text(f"🔍 Searching for '{query}'...")
 
@@ -398,25 +472,26 @@ async def download_tiktok_video(update: Update, context: ContextTypes.DEFAULT_TY
 # --- Message handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle regular text messages."""
-    if update.message.text and not update.message.text.startswith('/'):
+    message = update.message
+    if message.text and not message.text.startswith("/"):
         if not await check_membership(update, context):
             await send_join_message(update)
             return
 
         # Track user
-        add_user(update.effective_user.id)
+        add_user(message.from_user.id)
 
-        text = update.message.text.strip()
+        text = message.text.strip()
         # Auto-detect TikTok links
         if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
-            url_key = f"tt_{update.effective_user.id}_{int(time.time())}"
+            url_key = f"tt_{message.from_user.id}_{int(time.time())}"
             context.bot_data[url_key] = text
             keyboard = [
                 [InlineKeyboardButton("🎬 Video", callback_data=f"ttvideo:{url_key}")],
                 [InlineKeyboardButton("🎵 Audio Only", callback_data=f"ttaudio:{url_key}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("Choose download format:", reply_markup=reply_markup)
+            await message.reply_text("Choose download type:", reply_markup=reply_markup)
         else:
             # Treat as song search
             await search_song(update, context, text)
@@ -462,6 +537,74 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.message.edit_text("📤 Broadcasting quote to all users...")
         await broadcast_quote(context)
+
+    elif data == "change_schedule":
+        # Only owner can change schedule
+        if query.from_user.id != OWNER_ID:
+            await query.answer("❌ Only the owner can do this.", show_alert=True)
+            return
+
+        # Show time picker buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("6:00 AM", callback_data="schedule:06:00"),
+                InlineKeyboardButton("7:00 AM", callback_data="schedule:07:00"),
+                InlineKeyboardButton("8:00 AM", callback_data="schedule:08:00"),
+            ],
+            [
+                InlineKeyboardButton("9:00 AM", callback_data="schedule:09:00"),
+                InlineKeyboardButton("10:00 AM", callback_data="schedule:10:00"),
+                InlineKeyboardButton("12:00 PM", callback_data="schedule:12:00"),
+            ],
+            [
+                InlineKeyboardButton("2:00 PM", callback_data="schedule:14:00"),
+                InlineKeyboardButton("4:00 PM", callback_data="schedule:16:00"),
+                InlineKeyboardButton("6:00 PM", callback_data="schedule:18:00"),
+            ],
+            [
+                InlineKeyboardButton("7:00 PM", callback_data="schedule:19:00"),
+                InlineKeyboardButton("7:30 PM", callback_data="schedule:19:30"),
+                InlineKeyboardButton("8:00 PM", callback_data="schedule:20:00"),
+            ],
+            [
+                InlineKeyboardButton("8:30 PM", callback_data="schedule:20:30"),
+                InlineKeyboardButton("9:00 PM", callback_data="schedule:21:00"),
+                InlineKeyboardButton("10:00 PM", callback_data="schedule:22:00"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            "⏰ Select broadcast time (Myanmar Time):\n\n"
+            "Or use /settime HH:MM for custom time",
+            reply_markup=reply_markup
+        )
+
+    elif data.startswith("schedule:"):
+        # Only owner can change schedule
+        if query.from_user.id != OWNER_ID:
+            await query.answer("❌ Only the owner can do this.", show_alert=True)
+            return
+
+        time_str = data[9:]  # e.g., "19:30"
+        parts = time_str.split(':')
+        hour = int(parts[0])
+        minute = int(parts[1])
+
+        save_schedule(hour, minute)
+
+        # Remove old job and add new one
+        job_queue = context.application.job_queue
+        current_jobs = job_queue.get_jobs_by_name("daily_quote")
+        for job in current_jobs:
+            job.schedule_removal()
+
+        target_time = dtime(hour=hour, minute=minute, second=0, tzinfo=MMR_TZ)
+        job_queue.run_daily(daily_quote_job, time=target_time, name="daily_quote")
+
+        await query.message.edit_text(
+            f"✅ Broadcast time updated to {hour:02d}:{minute:02d} (Myanmar Time)\n\n"
+            "The daily quote will be sent at this time every day."
+        )
 
     elif data.startswith("ttvideo:"):
         url_key = data[8:]
@@ -526,7 +669,7 @@ def self_ping():
 
 # --- Scheduled job ---
 async def daily_quote_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job that runs daily at 7:30 PM Myanmar time to send quote."""
+    """Job that runs daily to send quote."""
     logger.info("Running daily quote broadcast...")
     await broadcast_quote(context)
 
@@ -540,14 +683,16 @@ def main() -> None:
     application.add_handler(CommandHandler("setquote", setquote_command))
     application.add_handler(CommandHandler("viewquote", viewquote_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("settime", settime_command))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Schedule daily quote at 7:30 PM Myanmar time (GMT+6:30)
+    # Schedule daily quote based on saved schedule
+    schedule = get_schedule()
     job_queue = application.job_queue
-    target_time = dtime(hour=19, minute=30, second=0, tzinfo=MMR_TZ)
-    job_queue.run_daily(daily_quote_job, time=target_time)
-    logger.info(f"Daily quote scheduled at 7:30 PM Myanmar time")
+    target_time = dtime(hour=schedule['hour'], minute=schedule['minute'], second=0, tzinfo=MMR_TZ)
+    job_queue.run_daily(daily_quote_job, time=target_time, name="daily_quote")
+    logger.info(f"Daily quote scheduled at {schedule['hour']:02d}:{schedule['minute']:02d} Myanmar time")
 
     # Start HTTP server in a separate thread
     http_server_thread = threading.Thread(target=start_http_server, daemon=True)
