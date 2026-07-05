@@ -6,6 +6,7 @@ import http.server
 import socketserver
 import threading
 import time
+import asyncio
 import requests
 from datetime import time as dtime, timezone, timedelta, datetime
 
@@ -46,7 +47,9 @@ def load_users() -> set:
     if os.path.exists(USERS_FILE):
         try:
             with open(USERS_FILE, 'r') as f:
-                return set(json.load(f))
+                data = json.load(f)
+                # Ensure all IDs are integers
+                return set(int(uid) for uid in data)
         except:
             return set()
     return set()
@@ -59,7 +62,13 @@ def save_users(users: set):
 def add_user(user_id: int):
     """Add a user to the tracked users."""
     users = load_users()
-    users.add(user_id)
+    users.add(int(user_id))
+    save_users(users)
+
+def remove_user(user_id: int):
+    """Remove a user from tracked users (e.g., if they blocked the bot)."""
+    users = load_users()
+    users.discard(int(user_id))
     save_users(users)
 
 # --- Quote management ---
@@ -104,28 +113,52 @@ async def broadcast_quote(context: ContextTypes.DEFAULT_TYPE):
         return
 
     users = load_users()
+    if not users:
+        logger.info("No users to broadcast to.")
+        return
+
     success = 0
     failed = 0
+    blocked_users = []
+
     for user_id in users:
         try:
-            await context.bot.send_message(chat_id=int(user_id), text=f"✨ Daily Quote ✨\n\n{quote}")
+            await context.bot.send_message(
+                chat_id=int(user_id),
+                text=f"✨ Daily Quote ✨\n\n{quote}"
+            )
             success += 1
         except Exception as e:
+            error_msg = str(e).lower()
+            # Check if user blocked the bot or chat not found
+            if 'blocked' in error_msg or 'not found' in error_msg or 'deactivated' in error_msg or 'chat not found' in error_msg:
+                blocked_users.append(user_id)
             logger.error(f"Failed to send quote to {user_id}: {e}")
             failed += 1
-        # Small delay to avoid hitting Telegram rate limits
-        if success % 25 == 0:
-            import asyncio
+
+        # Rate limit: pause every 20 messages to avoid Telegram limits
+        if (success + failed) % 20 == 0:
             await asyncio.sleep(1)
+
+    # Remove blocked/deactivated users from the list
+    if blocked_users:
+        for uid in blocked_users:
+            remove_user(uid)
+        logger.info(f"Removed {len(blocked_users)} blocked/deactivated users")
 
     logger.info(f"Broadcast complete: {success} sent, {failed} failed")
 
-    # Notify owner
+    # Notify owner with detailed report
     try:
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=f"📊 Broadcast Report:\n✅ Sent: {success}\n❌ Failed: {failed}\n👥 Total users: {len(users)}"
+        report = (
+            f"📊 Broadcast Report:\n"
+            f"✅ Sent: {success}\n"
+            f"❌ Failed: {failed}\n"
+            f"👥 Total users: {len(users)}\n"
         )
+        if blocked_users:
+            report += f"🚫 Removed {len(blocked_users)} blocked/deactivated users"
+        await context.bot.send_message(chat_id=OWNER_ID, text=report)
     except:
         pass
 
@@ -203,7 +236,8 @@ async def setquote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(
         f"✅ Quote set!\n\n\"{quote_text}\"\n\n"
         f"⏰ Scheduled daily at: {schedule_time} (Myanmar Time)\n"
-        "Or tap the button below to send it now:",
+        f"👥 Total users: {len(load_users())}\n\n"
+        "Tap below to send now or change time:",
         reply_markup=reply_markup
     )
 
@@ -274,7 +308,6 @@ async def settime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # Remove old job and add new one
     job_queue = context.application.job_queue
-    # Remove existing daily_quote jobs
     current_jobs = job_queue.get_jobs_by_name("daily_quote")
     for job in current_jobs:
         job.schedule_removal()
@@ -535,7 +568,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.answer("❌ Only the owner can do this.", show_alert=True)
             return
 
-        await query.message.edit_text("📤 Broadcasting quote to all users...")
+        users = load_users()
+        await query.message.edit_text(f"📤 Broadcasting quote to {len(users)} users...\nPlease wait...")
         await broadcast_quote(context)
 
     elif data == "change_schedule":
