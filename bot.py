@@ -114,6 +114,14 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     message = query.message
 
+    # Delete the song list message
+    try:
+        await message.delete()
+    except:
+        pass
+
+    chat_id = query.message.chat_id
+
     try:
         # Get track info from Deezer
         response = requests.get(f"https://api.deezer.com/track/{track_id}", timeout=10)
@@ -124,10 +132,10 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
         preview_url = track.get('preview')
 
         if not preview_url:
-            await message.reply_text("❌ No preview available for this track.")
+            await context.bot.send_message(chat_id, "❌ No preview available for this track.")
             return
 
-        await message.reply_text(f"🎵 Downloading: {title} - {artist}...")
+        await context.bot.send_message(chat_id, f"🎵 Downloading: {title} - {artist}...")
 
         # Download the preview MP3
         file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{artist}.mp3".replace('/', '_').replace(' ', '_'))
@@ -137,7 +145,8 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
             with open(file_path, 'wb') as f:
                 f.write(audio_response.content)
 
-            await message.reply_audio(
+            await context.bot.send_audio(
+                chat_id=chat_id,
                 audio=open(file_path, 'rb'),
                 title=title,
                 performer=artist
@@ -145,11 +154,11 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
 
             os.remove(file_path)
         else:
-            await message.reply_text("❌ Could not download the track.")
+            await context.bot.send_message(chat_id, "❌ Could not download the track.")
 
     except Exception as e:
         logger.error(f"Error downloading Deezer track {track_id}: {e}")
-        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
+        await context.bot.send_message(chat_id, "❌ An error occurred while downloading. Please try again later.")
     finally:
         cleanup_downloads()
 
