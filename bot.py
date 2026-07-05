@@ -1,11 +1,13 @@
 import logging
 import os
 import re
+import json
 import http.server
 import socketserver
 import threading
 import time
 import requests
+from datetime import time as dtime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -17,6 +19,14 @@ DOWNLOAD_DIR = 'downloads'
 MAX_FILE_SIZE_MB = 50
 REQUIRED_CHANNEL = '@Soulscript0'
 CHANNEL_LINK = 'https://t.me/Soulscript0'
+OWNER_ID = 8731823643  # Owner's Telegram user ID
+
+# Myanmar timezone (GMT+6:30)
+MMR_TZ = timezone(timedelta(hours=6, minutes=30))
+
+# File to store users and quote
+USERS_FILE = 'users.json'
+QUOTE_FILE = 'quote.json'
 
 # Set up logging
 logging.basicConfig(
@@ -28,6 +38,76 @@ logger = logging.getLogger(__name__)
 # Ensure download directory exists
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# --- User tracking ---
+def load_users() -> set:
+    """Load user IDs from file."""
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, 'r') as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_users(users: set):
+    """Save user IDs to file."""
+    with open(USERS_FILE, 'w') as f:
+        json.dump(list(users), f)
+
+def add_user(user_id: int):
+    """Add a user to the tracked users."""
+    users = load_users()
+    users.add(user_id)
+    save_users(users)
+
+# --- Quote management ---
+def get_quote() -> str:
+    """Get the current quote."""
+    if os.path.exists(QUOTE_FILE):
+        try:
+            with open(QUOTE_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get('quote', '')
+        except:
+            return ''
+    return ''
+
+def set_quote(quote: str):
+    """Set the current quote."""
+    with open(QUOTE_FILE, 'w') as f:
+        json.dump({'quote': quote}, f)
+
+# --- Broadcast function ---
+async def broadcast_quote(context: ContextTypes.DEFAULT_TYPE):
+    """Send the current quote to all users."""
+    quote = get_quote()
+    if not quote:
+        logger.info("No quote set, skipping broadcast.")
+        return
+
+    users = load_users()
+    success = 0
+    failed = 0
+    for user_id in users:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"✨ Daily Quote ✨\n\n{quote}")
+            success += 1
+        except Exception as e:
+            logger.error(f"Failed to send quote to {user_id}: {e}")
+            failed += 1
+
+    logger.info(f"Broadcast complete: {success} sent, {failed} failed")
+
+    # Notify owner
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"📊 Broadcast Report:\n✅ Sent: {success}\n❌ Failed: {failed}"
+        )
+    except:
+        pass
+
+# --- Membership check ---
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user has joined the required channel."""
     user_id = update.effective_user.id
@@ -56,11 +136,15 @@ async def send_join_message(update: Update) -> None:
         reply_markup=reply_markup
     )
 
+# --- Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a welcome message when the command /start is issued."""
     if not await check_membership(update, context):
         await send_join_message(update)
         return
+
+    # Track user
+    add_user(update.effective_user.id)
 
     user = update.effective_user
     await update.message.reply_html(
@@ -73,13 +157,71 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Just send me a TikTok link or a song name!"
     )
 
+async def setquote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner command to set the daily quote."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Only the owner can use this command.")
+        return
+
+    quote_text = ' '.join(context.args)
+    if not quote_text:
+        await update.message.reply_text("Usage: /setquote <your quote text>")
+        return
+
+    set_quote(quote_text)
+
+    keyboard = [
+        [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"✅ Quote set!\n\n\"{quote_text}\"\n\n"
+        "This will be sent to all users at 7:30 PM daily.\n"
+        "Or tap the button below to send it now:",
+        reply_markup=reply_markup
+    )
+
+async def viewquote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner command to view the current quote."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Only the owner can use this command.")
+        return
+
+    quote = get_quote()
+    if quote:
+        keyboard = [
+            [InlineKeyboardButton("📤 Send to All Users Now", callback_data="broadcast_now")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"📝 Current quote:\n\n\"{quote}\"\n\n"
+            f"👥 Total users: {len(load_users())}",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text("No quote set. Use /setquote <text> to set one.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner command to see bot stats."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Only the owner can use this command.")
+        return
+
+    users = load_users()
+    quote = get_quote()
+    await update.message.reply_text(
+        f"📊 Bot Stats:\n\n"
+        f"👥 Total users: {len(users)}\n"
+        f"📝 Current quote: {quote if quote else 'Not set'}"
+    )
+
+# --- Song search ---
 async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
     """Search for a song using Deezer API and show results."""
     message = update.message if update.message else update.callback_query.message
     await message.reply_text(f"🔍 Searching for '{query}'...")
 
     try:
-        # Use Deezer public API (no auth required)
         response = requests.get(
             f"https://api.deezer.com/search",
             params={'q': query, 'limit': 5},
@@ -123,7 +265,6 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = query.message.chat_id
 
     try:
-        # Get track info from Deezer
         response = requests.get(f"https://api.deezer.com/track/{track_id}", timeout=10)
         track = response.json()
 
@@ -137,7 +278,6 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
 
         await context.bot.send_message(chat_id, f"🎵 Downloading: {title} - {artist}...")
 
-        # Download the preview MP3
         file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{artist}.mp3".replace('/', '_').replace(' ', '_'))
         audio_response = requests.get(preview_url, timeout=30)
 
@@ -162,6 +302,7 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         cleanup_downloads()
 
+# --- TikTok downloads ---
 async def download_tiktok_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """Download audio from a TikTok URL."""
     message = update.message if update.message else update.callback_query.message
@@ -254,6 +395,7 @@ async def download_tiktok_video(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         cleanup_downloads()
 
+# --- Message handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle regular text messages."""
     if update.message.text and not update.message.text.startswith('/'):
@@ -261,11 +403,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await send_join_message(update)
             return
 
+        # Track user
+        add_user(update.effective_user.id)
+
         text = update.message.text.strip()
         # Auto-detect TikTok links
         if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
-            # Show options: video or audio
-            # Store URL in bot_data to avoid callback_data length limit
             url_key = f"tt_{update.effective_user.id}_{int(time.time())}"
             context.bot_data[url_key] = text
             keyboard = [
@@ -290,6 +433,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await search_song(update, context, query)
 
+# --- Button handler ---
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button presses."""
     query = update.callback_query
@@ -302,12 +446,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
             if member.status in ['member', 'administrator', 'creator']:
+                add_user(user_id)
                 await query.message.edit_text("✅ Verified! You can now use the bot.\n\nSend me a TikTok link or a song name to search.")
             else:
                 await query.answer("❌ You haven't joined the channel yet.", show_alert=True)
         except Exception as e:
             logger.error(f"Error verifying membership: {e}")
             await query.answer("❌ Could not verify. Make sure you joined the channel.", show_alert=True)
+
+    elif data == "broadcast_now":
+        # Only owner can broadcast
+        if query.from_user.id != OWNER_ID:
+            await query.answer("❌ Only the owner can do this.", show_alert=True)
+            return
+
+        await query.message.edit_text("📤 Broadcasting quote to all users...")
+        await broadcast_quote(context)
 
     elif data.startswith("ttvideo:"):
         url_key = data[8:]
@@ -329,6 +483,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         track_id = data[7:]
         await download_deezer_track(update, context, track_id)
 
+# --- Utilities ---
 def cleanup_downloads():
     """Clean up any leftover files in download directory."""
     for f in os.listdir(DOWNLOAD_DIR):
@@ -369,6 +524,12 @@ def self_ping():
             logger.error(f"Self-ping failed: {e}")
         time.sleep(10 * 60)
 
+# --- Scheduled job ---
+async def daily_quote_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job that runs daily at 7:30 PM Myanmar time to send quote."""
+    logger.info("Running daily quote broadcast...")
+    await broadcast_quote(context)
+
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(TOKEN).build()
@@ -376,8 +537,17 @@ def main() -> None:
     # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("setquote", setquote_command))
+    application.add_handler(CommandHandler("viewquote", viewquote_command))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Schedule daily quote at 7:30 PM Myanmar time (GMT+6:30)
+    job_queue = application.job_queue
+    target_time = dtime(hour=19, minute=30, second=0, tzinfo=MMR_TZ)
+    job_queue.run_daily(daily_quote_job, time=target_time)
+    logger.info(f"Daily quote scheduled at 7:30 PM Myanmar time")
 
     # Start HTTP server in a separate thread
     http_server_thread = threading.Thread(target=start_http_server, daemon=True)
