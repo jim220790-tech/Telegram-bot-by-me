@@ -261,7 +261,7 @@ async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query:
         await message.reply_text("❌ An error occurred during search. Please try again later.")
 
 async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TYPE, track_id: str) -> None:
-    """Download a track preview from Deezer."""
+    """Get track info from Deezer, then download full song from YouTube."""
     query = update.callback_query
     message = query.message
 
@@ -274,50 +274,85 @@ async def download_deezer_track(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = query.message.chat_id
 
     try:
+        # Get track info from Deezer
         response = requests.get(f"https://api.deezer.com/track/{track_id}", timeout=10)
         track = response.json()
 
         title = track.get('title', 'Unknown')
         artist = track.get('artist', {}).get('name', 'Unknown')
         album = track.get('album', {}).get('title', 'Unknown')
-        preview_url = track.get('preview')
         duration_sec = track.get('duration', 0)
         minutes = duration_sec // 60
         seconds = duration_sec % 60
         duration_str = f"{minutes}:{seconds:02d}"
 
-        if not preview_url:
-            await context.bot.send_message(chat_id, "❌ No preview available for this track.")
-            return
-
         await context.bot.send_message(
             chat_id,
             f"🎵 Downloading: {title} - {artist}\n"
             f"💿 Album: {album}\n"
-            f"⏱ Duration: {duration_str}"
+            f"⏱ Duration: {duration_str}\n\n"
+            f"⏳ Downloading full song from YouTube..."
         )
 
+        # Search and download from YouTube using yt-dlp
+        search_query = f"{title} {artist} audio"
         file_path = os.path.join(DOWNLOAD_DIR, f"{title}_{artist}.mp3".replace('/', '_').replace(' ', '_'))
-        audio_response = requests.get(preview_url, timeout=30)
 
-        if audio_response.status_code == 200:
-            with open(file_path, 'wb') as f:
-                f.write(audio_response.content)
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': os.path.join(DOWNLOAD_DIR, f"{title}_{artist}".replace('/', '_').replace(' ', '_') + '.%(ext)s'),
+            'restrictfilenames': False,
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
+            'default_search': 'ytsearch1',
+        }
 
-            await context.bot.send_audio(
-                chat_id=chat_id,
-                audio=open(file_path, 'rb'),
-                title=title,
-                performer=artist,
-                duration=duration_sec
-            )
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{search_query}", download=True)
+            if 'entries' in info:
+                info = info['entries'][0]
+            
+            # Get the actual file path
+            actual_file = ydl.prepare_filename(info)
+            base, ext = os.path.splitext(actual_file)
+            actual_file_mp3 = base + '.mp3'
 
-            os.remove(file_path)
-        else:
-            await context.bot.send_message(chat_id, "❌ Could not download the track.")
+            if not os.path.exists(actual_file_mp3):
+                # Try finding any mp3 in downloads
+                for f in os.listdir(DOWNLOAD_DIR):
+                    if f.endswith('.mp3'):
+                        actual_file_mp3 = os.path.join(DOWNLOAD_DIR, f)
+                        break
+
+            if os.path.exists(actual_file_mp3):
+                file_size = os.path.getsize(actual_file_mp3)
+                if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                    await context.bot.send_message(chat_id, f"❌ File exceeds {MAX_FILE_SIZE_MB}MB limit.")
+                else:
+                    # Get actual duration from YouTube info
+                    yt_duration = info.get('duration', duration_sec)
+                    
+                    await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=open(actual_file_mp3, 'rb'),
+                        title=title,
+                        performer=artist,
+                        duration=yt_duration
+                    )
+
+                os.remove(actual_file_mp3)
+            else:
+                await context.bot.send_message(chat_id, "❌ Could not download the full song. Please try again.")
 
     except Exception as e:
-        logger.error(f"Error downloading Deezer track {track_id}: {e}")
+        logger.error(f"Error downloading track {track_id}: {e}")
         await context.bot.send_message(chat_id, "❌ An error occurred while downloading. Please try again later.")
     finally:
         cleanup_downloads()
