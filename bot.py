@@ -13,7 +13,7 @@ from yt_dlp import YoutubeDL
 
 # Configuration
 TOKEN = os.environ.get('TOKEN', '8870862159:AAF3WlBNfgqejm4yPDeyGnrwjdIDkFGemCM')
-AUDIO_DIR = 'downloads'
+DOWNLOAD_DIR = 'downloads'
 MAX_FILE_SIZE_MB = 50
 REQUIRED_CHANNEL = '@Soulscript0'
 CHANNEL_LINK = 'https://t.me/Soulscript0'
@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Ensure download directory exists
-os.makedirs(AUDIO_DIR, exist_ok=True)
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user has joined the required channel."""
@@ -48,7 +48,8 @@ async def send_join_message(update: Update) -> None:
         [InlineKeyboardButton("✅ I've Joined", callback_data="check_joined")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text(
         "⚠️ You must join our channel to use this bot.\n\n"
         f"👉 Join: {CHANNEL_LINK}\n\n"
         "After joining, tap the button below to verify.",
@@ -63,21 +64,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     await update.message.reply_html(
-        f"Hi {user.mention_html()}!\n\n"
-        "I'm a music downloader bot. Just send me a link and I'll download the audio for you.\n\n"
-        "Supported links:\n"
-        "• TikTok (tiktok.com, vt.tiktok.com, vm.tiktok.com)\n"
-        "• YouTube (youtube.com, youtu.be)\n\n"
-        "Just paste a link directly!"
+        f"Hi {user.mention_html()}! 🎵\n\n"
+        "I'm a music & video downloader bot.\n\n"
+        "🔹 <b>TikTok Download:</b>\n"
+        "Just paste a TikTok link and choose video or audio.\n\n"
+        "🔹 <b>Song Search:</b>\n"
+        "Send a song name and I'll find it for you.\n\n"
+        "Commands:\n"
+        "/start - Show this message\n"
+        "/search <song name> - Search for a song"
     )
 
-async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
-    """Download audio from a given URL and send it to the user."""
+async def download_tiktok_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    """Download audio from a TikTok URL."""
     message = update.message if update.message else update.callback_query.message
+    await message.reply_text("🎵 Downloading TikTok audio...")
 
-    await message.reply_text(f"Downloading audio from {platform}...")
-
-    # Define options for yt-dlp
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -85,62 +87,186 @@ async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': os.path.join(AUDIO_DIR, '%(title)s.%(ext)s'),
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
         'restrictfilenames': True,
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-        'extractor_args': {'youtube': {'player_client': ['web']}},
-        'socket_timeout': 30,
-        'retries': 3,
     }
 
-    info = None
     try:
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
-            # yt-dlp might not always return mp3 extension directly
             base, ext = os.path.splitext(file_path)
             if ext != '.mp3':
                 file_path = base + '.mp3'
-            
+
             if not os.path.exists(file_path):
-                await message.reply_text("Error: Downloaded file not found. It might have exceeded the file size limit.")
-                logger.error(f"Downloaded file not found at {file_path} for URL: {url}")
+                await message.reply_text("❌ Error: Could not download audio.")
                 return
 
             file_size = os.path.getsize(file_path)
             if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-                await message.reply_text(f"The audio file exceeds the {MAX_FILE_SIZE_MB}MB limit and cannot be sent.")
+                await message.reply_text(f"❌ File exceeds {MAX_FILE_SIZE_MB}MB limit.")
             else:
-                await message.reply_audio(audio=open(file_path, 'rb'), title=info.get('title', 'audio'), performer=info.get('artist', 'Unknown'))
-                await message.reply_text("Audio sent successfully!")
+                await message.reply_audio(
+                    audio=open(file_path, 'rb'),
+                    title=info.get('title', 'TikTok Audio'),
+                    performer=info.get('artist', info.get('uploader', 'Unknown'))
+                )
 
-            # Clean up
             os.remove(file_path)
-            logger.info(f"Successfully sent and removed file: {file_path}")
 
     except Exception as e:
-        logger.error(f"Error downloading audio from {url}: {e}")
-        await message.reply_text("An error occurred while downloading the audio. Please try again later.")
+        logger.error(f"Error downloading TikTok audio from {url}: {e}")
+        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
     finally:
-        # Clean up any leftover files
-        for f in os.listdir(AUDIO_DIR):
-            try:
-                os.remove(os.path.join(AUDIO_DIR, f))
-            except:
-                pass
+        cleanup_downloads()
+
+async def download_tiktok_video(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    """Download video from a TikTok URL."""
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text("🎬 Downloading TikTok video...")
+
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        'restrictfilenames': True,
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+
+            if not os.path.exists(file_path):
+                await message.reply_text("❌ Error: Could not download video.")
+                return
+
+            file_size = os.path.getsize(file_path)
+            if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                await message.reply_text(f"❌ Video exceeds {MAX_FILE_SIZE_MB}MB limit.")
+            else:
+                await message.reply_video(
+                    video=open(file_path, 'rb'),
+                    caption=info.get('title', 'TikTok Video'),
+                    supports_streaming=True
+                )
+
+            os.remove(file_path)
+
+    except Exception as e:
+        logger.error(f"Error downloading TikTok video from {url}: {e}")
+        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
+    finally:
+        cleanup_downloads()
+
+async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    """Search for a song using yt-dlp SoundCloud search and show results."""
+    message = update.message if update.message else update.callback_query.message
+    await message.reply_text(f"🔍 Searching for '{query}'...")
+
+    ydl_opts = {
+        'default_search': 'scsearch5',
+        'noplaylist': True,
+        'quiet': True,
+        'extract_flat': True,
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            if 'entries' in info:
+                results = info['entries']
+                if not results:
+                    await message.reply_text("❌ No results found. Try a different search term.")
+                    return
+
+                keyboard = []
+                for i, entry in enumerate(results):
+                    if entry and 'url' in entry and 'title' in entry:
+                        title = entry['title'][:50]  # Truncate long titles
+                        callback_data = f"song:{entry['url']}"
+                        if len(callback_data) <= 64:
+                            keyboard.append([InlineKeyboardButton(f"🎵 {title}", callback_data=callback_data)])
+                        else:
+                            # Store URL in context for long URLs
+                            key = f"song_{i}_{hash(entry['url']) % 10000}"
+                            context.bot_data[key] = entry['url']
+                            keyboard.append([InlineKeyboardButton(f"🎵 {title}", callback_data=f"songkey:{key}")])
+
+                if not keyboard:
+                    await message.reply_text("❌ No downloadable results found.")
+                    return
+
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await message.reply_text("🎶 Select a song to download:", reply_markup=reply_markup)
+            else:
+                await message.reply_text("❌ Could not find any songs.")
+    except Exception as e:
+        logger.error(f"Error searching for '{query}': {e}")
+        await message.reply_text("❌ An error occurred during search. Please try again later.")
+
+async def download_song(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    """Download a song from URL."""
+    query = update.callback_query
+    message = query.message
+    await message.reply_text("🎵 Downloading song...")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        'restrictfilenames': True,
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': MAX_FILE_SIZE_MB * 1024 * 1024,
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+            base, ext = os.path.splitext(file_path)
+            if ext != '.mp3':
+                file_path = base + '.mp3'
+
+            if not os.path.exists(file_path):
+                await message.reply_text("❌ Error: Could not download song.")
+                return
+
+            file_size = os.path.getsize(file_path)
+            if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                await message.reply_text(f"❌ File exceeds {MAX_FILE_SIZE_MB}MB limit.")
+            else:
+                await message.reply_audio(
+                    audio=open(file_path, 'rb'),
+                    title=info.get('title', 'Song'),
+                    performer=info.get('artist', info.get('uploader', 'Unknown'))
+                )
+
+            os.remove(file_path)
+
+    except Exception as e:
+        logger.error(f"Error downloading song from {url}: {e}")
+        await message.reply_text("❌ An error occurred while downloading. Please try again later.")
+    finally:
+        cleanup_downloads()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle regular text messages - detect TikTok or YouTube links."""
+    """Handle regular text messages."""
     if update.message.text and not update.message.text.startswith('/'):
-        # Check channel membership first
         if not await check_membership(update, context):
             await send_join_message(update)
             return
@@ -148,64 +274,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = update.message.text.strip()
         # Auto-detect TikTok links
         if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
-            await download_audio(update, context, text, "TikTok")
-        # Auto-detect YouTube links
-        elif re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$', text):
-            await download_audio(update, context, text, "YouTube")
+            # Show options: video or audio
+            keyboard = [
+                [InlineKeyboardButton("🎬 Video", callback_data=f"ttvideo:{text}")],
+                [InlineKeyboardButton("🎵 Audio Only", callback_data=f"ttaudio:{text}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("Choose download format:", reply_markup=reply_markup)
         else:
-            await update.message.reply_text(
-                "Please send me a valid TikTok or YouTube link.\n\n"
-                "Examples:\n"
-                "• https://vt.tiktok.com/ZSCpetre9/\n"
-                "• https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-            )
+            # Treat as song search
+            await search_song(update, context, text)
 
-async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Download audio from a TikTok URL."""
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /search command."""
     if not await check_membership(update, context):
         await send_join_message(update)
         return
 
-    if not context.args:
-        await update.message.reply_text("Please provide a TikTok URL. Example: /tiktok https://vt.tiktok.com/ZSCpetre9/")
+    query = ' '.join(context.args)
+    if not query:
+        await update.message.reply_text("Please provide a song name. Example: /search Stay Forever")
         return
-    url = context.args[0]
-    if not re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', url):
-        await update.message.reply_text("Please provide a valid TikTok URL.")
-        return
-    await download_audio(update, context, url, "TikTok")
-
-async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Download audio from a YouTube URL."""
-    if not await check_membership(update, context):
-        await send_join_message(update)
-        return
-
-    if not context.args:
-        await update.message.reply_text("Please provide a YouTube URL. Example: /youtube https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        return
-    url = context.args[0]
-    if not re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$', url):
-        await update.message.reply_text("Please provide a valid YouTube URL.")
-        return
-    await download_audio(update, context, url, "YouTube")
+    await search_song(update, context, query)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button presses."""
     query = update.callback_query
     await query.answer()
 
-    if query.data == "check_joined":
+    data = query.data
+
+    if data == "check_joined":
         user_id = query.from_user.id
         try:
             member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
             if member.status in ['member', 'administrator', 'creator']:
-                await query.message.edit_text("✅ Verified! You can now use the bot. Just send me a TikTok or YouTube link.")
+                await query.message.edit_text("✅ Verified! You can now use the bot.\n\nSend me a TikTok link or a song name to search.")
             else:
-                await query.answer("❌ You haven't joined the channel yet. Please join first.", show_alert=True)
+                await query.answer("❌ You haven't joined the channel yet.", show_alert=True)
         except Exception as e:
             logger.error(f"Error verifying membership: {e}")
             await query.answer("❌ Could not verify. Make sure you joined the channel.", show_alert=True)
+
+    elif data.startswith("ttvideo:"):
+        url = data[8:]
+        await download_tiktok_video(update, context, url)
+
+    elif data.startswith("ttaudio:"):
+        url = data[8:]
+        await download_tiktok_audio(update, context, url)
+
+    elif data.startswith("song:"):
+        url = data[5:]
+        await download_song(update, context, url)
+
+    elif data.startswith("songkey:"):
+        key = data[8:]
+        url = context.bot_data.get(key)
+        if url:
+            await download_song(update, context, url)
+        else:
+            await query.message.reply_text("❌ Song link expired. Please search again.")
+
+def cleanup_downloads():
+    """Clean up any leftover files in download directory."""
+    for f in os.listdir(DOWNLOAD_DIR):
+        try:
+            os.remove(os.path.join(DOWNLOAD_DIR, f))
+        except:
+            pass
 
 class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -213,9 +350,9 @@ class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b'Bot is running')
-    
+
     def log_message(self, format, *args):
-        pass  # Suppress HTTP server logs
+        pass
 
 def start_http_server():
     PORT = 10000
@@ -237,7 +374,7 @@ def self_ping():
             logger.info(f"Self-ping: {response.status_code}")
         except requests.exceptions.RequestException as e:
             logger.error(f"Self-ping failed: {e}")
-        time.sleep(10 * 60)  # Ping every 10 minutes
+        time.sleep(10 * 60)
 
 def main() -> None:
     """Start the bot."""
@@ -245,8 +382,7 @@ def main() -> None:
 
     # Register handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("tiktok", tiktok_command))
-    application.add_handler(CommandHandler("youtube", youtube_command))
+    application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
