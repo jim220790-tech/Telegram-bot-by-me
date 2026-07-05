@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-music-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    plan: free
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TOKEN
+        value: "8870862159:AAF3WlBNfgqejm4yPDeyGnrwjdIDkFGemCM"
