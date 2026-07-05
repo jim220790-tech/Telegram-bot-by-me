@@ -81,10 +81,20 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("An error occurred during the search. Please try again later.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle regular text messages as search queries."""
+    """Handle regular text messages - detect TikTok links or search YouTube."""
     if update.message.text and not update.message.text.startswith('/'):
-        context.args = update.message.text.split()
-        await search(update, context)
+        text = update.message.text.strip()
+        # Auto-detect TikTok links
+        if re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', text):
+            context.args = [text]
+            await tiktok_command(update, context)
+        # Auto-detect YouTube links
+        elif re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$', text):
+            context.args = [text]
+            await youtube_command(update, context)
+        else:
+            context.args = text.split()
+            await search(update, context)
 
 async def download_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
     """Download audio from a given URL and send it to the user."""
@@ -158,10 +168,10 @@ async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download audio from a TikTok URL."""
     if not context.args:
-        await update.message.reply_text("Please provide a TikTok URL. Example: /tiktok https://www.tiktok.com/@tiktok/video/7010729721360000000")
+        await update.message.reply_text("Please provide a TikTok URL. Example: /tiktok https://vt.tiktok.com/ZSCpetre9/")
         return
     url = context.args[0]
-    if not re.match(r'^(https?://)?(www\.)?tiktok\.com/.+$', url):
+    if not re.match(r'^(https?://)?(www\.|vt\.|vm\.)?tiktok\.com/.+$', url):
         await update.message.reply_text("Please provide a valid TikTok URL.")
         return
     await download_audio(update, context, url, "TikTok")
